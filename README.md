@@ -10,7 +10,7 @@
 > ```
 >
 > An edit made here will be silently overwritten on the next mirror. Make it in
-> `edge_search` instead. Last mirrored 2026-09-29.
+> `edge_search` instead. Last mirrored 2026-09-30.
 
 Hockey DFS is correlation: a goal pays a scorer and up to two linemates at once. The build simulates every game on the slate -- team goals from the betting market, scorers and linemate-weighted assists from DraftKings' player props, DailyFaceoff's lines and starting goalies -- and scores lineups on percentiles of the simulated total. Read `NHL_STATUS.md` first.
 
