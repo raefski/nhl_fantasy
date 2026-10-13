@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from edge import dfs, dfs_nhl_theory as theory, dfs_opt_nhl, nhl, nhl_sim
+from edge import dfs, dfs_nhl_field, dfs_nhl_theory as theory, dfs_opt_nhl, nhl, nhl_sim
 from edge.dfs_run_nfl import _parse_time, slate_games
 from edge.names import norm
 
@@ -57,6 +57,13 @@ def classic_groups(groups: list[dict] | None = None) -> list[dict]:
     return out
 
 
+def default_slate(rows: list[dict]) -> int:
+    """Index of the NEXT Main slate to lock. DK lists tomorrow's Main next to
+    tonight's, so "the Main with the most games" picked tomorrow's 10-game
+    slate over tonight's 3-game one (2026-10-07). `rows` is start-sorted."""
+    return next((i for i, r in enumerate(rows) if r["label"] == "Main"), 0)
+
+
 def resolve_slate(draft_group=None, groups: list[dict] | None = None):
     """(gid, meta). Defaults to DK's main slate: the Classic group with no
     suffix, as for the NFL (see dfs_run_nfl.resolve_slate)."""
@@ -67,8 +74,7 @@ def resolve_slate(draft_group=None, groups: list[dict] | None = None):
                                             "games": 0})
     if not rows:
         return None, {"error": "DraftKings is listing no NHL Classic slates."}
-    main = [r for r in rows if r["label"] == "Main"]
-    pick = max(main or rows, key=lambda r: (r["games"], r["featured"]))
+    pick = rows[default_slate(rows)]
     return pick["gid"], pick
 
 
@@ -269,11 +275,14 @@ def build_board(gid: int, meta: dict, client, n_sims: int = 2000, seed: int = 0)
 # ---------------------------------------------------------------------------
 # The whole slate
 # ---------------------------------------------------------------------------
+#: source: "live" for a build made before lock, "rebuild" for one reconstructed
+#: afterwards from pinned pre-lock inputs (scripts/nhl_rebuild.py).
 PROJ_LOG_COLS = ("date", "gid", "player", "team", "opp", "dk_pos", "line", "pp", "salary",
-                 "proj", "sd", "floor", "ceil", "own", "imputed")
+                 "proj", "sd", "floor", "ceil", "own", "imputed", "source")
 
 
-def log_forward_test(pool, cash, gpp, gid, info, root: Path | None = None) -> dict:
+def log_forward_test(pool, cash, gpp, gid, info, root: Path | None = None,
+                     cash_floor: dict | None = None) -> dict:
     """Persist a build so a contest export has something to be joined to.
     Same contract as the other sports: a past date never overwrites the log."""
     root = root or ROOT
@@ -287,7 +296,8 @@ def log_forward_test(pool, cash, gpp, gid, info, root: Path | None = None) -> di
     rows += [{"date": date, "gid": gid, "player": p["name"], "team": p["team"], "opp": p.get("opp"),
               "dk_pos": p.get("dk_pos"), "line": p.get("line") or "", "pp": p.get("pp") or "",
               "salary": p["salary"], "proj": p["proj"], "sd": p["sd"], "floor": p["floor"],
-              "ceil": p["ceil"], "own": p.get("own", ""), "imputed": "|".join(p.get("imputed", []))}
+              "ceil": p["ceil"], "own": p.get("own", ""), "imputed": "|".join(p.get("imputed", [])),
+              "source": "live"}
              for p in pool]
     plog.parent.mkdir(parents=True, exist_ok=True)
     with plog.open("w", newline="") as fh:
@@ -298,7 +308,7 @@ def log_forward_test(pool, cash, gpp, gid, info, root: Path | None = None) -> di
     with lpath.open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["mode", "slot", "player", "team", "line", "pp", "salary", "proj", "own"])
-        for mode, res in (("cash", cash), ("gpp", gpp)):
+        for mode, res in (("cash", cash), ("gpp", gpp), ("cash_floor", cash_floor)):
             for slot, p in (res or {}).get("slots", []):
                 w.writerow([mode, slot, p["name"], p["team"], p.get("line"), p.get("pp"),
                             p["salary"], p["proj"], p.get("own")])
@@ -330,14 +340,23 @@ def build_slate(draft_group=None, client=None, n_sims: int = 2000, iters: int = 
     if not pool:
         return {"error": "No NHL players could be projected for this slate.", "gid": gid,
                 "meta": meta, "slates": slates, "stats": info}
-    cash = dfs_opt_nhl.optimize(pool, sim, mode="cash", iters=iters, seed=seed)
+    # Cash is field-aware (NHL_STATUS.md 6c): the lineup most likely to clear
+    # the simulated double-up field. The old floor lineup is kept and logged
+    # beside it so the switch keeps being graded.
+    cash_floor = dfs_opt_nhl.optimize(pool, sim, mode="cash", iters=iters, seed=seed)
+    try:
+        cash = dfs_nhl_field.optimize_cash(pool, sim, iters=iters, seed=seed)
+    except ValueError as exc:
+        log.warning("dfs_run_nhl: field-aware cash failed (%s); using the floor lineup", exc)
+        cash = cash_floor
     gpp = dfs_opt_nhl.optimize(pool, sim, mode="gpp", iters=iters, seed=seed,
                                own_weight=own_weight)
     log_result = None
     if persist:
         try:
-            log_result = log_forward_test(pool, cash, gpp, gid, info)
+            log_result = log_forward_test(pool, cash, gpp, gid, info, cash_floor=cash_floor)
         except Exception as exc:                            # noqa: BLE001
             log.warning("dfs_run_nhl: forward-test logging failed: %s", exc)
     return {"gid": gid, "meta": meta, "slates": slates, "pool": pool, "sim": sim,
-            "stats": info, "cash": cash, "gpp": gpp, "log": log_result}
+            "stats": info, "cash": cash, "cash_floor": cash_floor, "gpp": gpp,
+            "log": log_result}

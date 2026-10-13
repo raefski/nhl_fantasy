@@ -120,6 +120,91 @@ skater-team fix below). `scripts/nhl_calibration.py --fit-ownership`:
   SKATERS only. The first GPP lineup (EDM + BOS skaters, TOR goalie) was
   rejected by DraftKings; `_valid` counted the goalie's team.
 
+## 6b. Seven nights graded (2026-09-29 to 10-07)
+
+**Correction (2026-10-08).** Earlier versions of this section graded every
+export after 9/29 against the 9/29 board: phone builds never reach the local
+log, and `nhl_calibration.py` silently picks the best-overlapping logged
+slate, which is any night with the same players. Those numbers are void. The
+missing nights were rebuilt with `scripts/nhl_rebuild.py` (DK draftables and
+the DailyFaceoff snapshot from git, odds from the store's last pre-lock scan;
+logged as `source=rebuild`). Checked against the live-logged 10/07 build: 112
+of 112 players, projection mean |diff| 0.12, ownership 0.73. Every export now
+matches its own slate exactly (all field players on the board) and its summed
+ownership is ~880% of a 900% roster.
+
+| night | gid | games | contest | skaters | bias | MAE | rho | below p25 | above p95 |
+|---|---|---|---|---|---|---|---|---|---|
+| 9/29 | 153977 | 4 | cash | 113 | +0.47 | 5.14 | +0.23 | 26% | 11% |
+| 9/30 | 154305 | 3 | gpp / cash | 104 / 86 | −0.26 / +0.12 | 5.42 / 5.40 | +0.08 / +0.09 | 30% | 17% / 13% |
+| 10/1 | 154311 | 8 | gpp / cash | 234 / 89 | −0.58 / −0.42 | 5.16 / 5.18 | +0.34 / +0.42 | 18% / 15% | 14% / 10% |
+| 10/3 | 154332 | 13 | gpp / cash | 354 / 173 | +0.48 / +0.57 | 4.76 / 4.82 | +0.37 / +0.44 | 24% | 9% |
+| 10/4 | 154342 | 4 | gpp / cash | 121 / 69 | +0.11 / +0.25 | 4.43 / 4.66 | +0.36 / +0.34 | 20% / 19% | 6% |
+| 10/6 | 154356 | 9 | gpp / cash | 265 / 187 | −0.46 / −0.90 | 5.04 / 5.72 | +0.38 / +0.34 | 18% | 12% / 14% |
+| 10/7 | 154690 | 3 | gpp / cash | 99 / 63 | +0.53 / +0.19 | 4.68 / 5.34 | +0.45 / +0.46 | 26% / 29% | 10% / 13% |
+| 10/9 | 154704 | 4 | gpp / cash | 116 / 91 | +1.50 / +1.43 | 4.68 / 4.84 | +0.26 / +0.14 | 23% | 6% / 5% |
+
+- **The mean is unbiased** (−0.9 to +0.6 every night).
+- **The upper tail is too thin, every night**: 6–17% of skaters beat their
+  simulated 95th percentile against 5%. Seven nights, one direction. This is
+  the simulator's main open problem and it matters most for GPP, which
+  selects on the 95th. Suspects unchanged: linemate-affinity prior,
+  per-player goal variance.
+
+**Ownership by slate size** (top owned / sum of top three, field vs model):
+
+| contest | games | field top | model top | field top-3 | model top-3 |
+|---|---|---|---|---|---|
+| cash | 3, 3, 4, 4 | 76–88% | 48–60% | 185–194% | 102–131% |
+| cash | 8, 9, 13 | 84%, 40%, 68% | 30%, 24%, 10% | 223%, 97%, 159% | 74%, 57%, 29% |
+| gpp | 3, 3, 4 | 60%, 40%, 44% | 51%, 48%, 51% | 136%, 107%, 104% | 131%, 118%, 102% |
+| gpp | 8, 9, 13 | 39%, 19%, 29% | 30%, 24%, 10% | 95%, 53%, 76% | 74%, 57%, 29% |
+
+- **Cash concentrates hard at every slate size**, not just small ones: the
+  top player is 68–88% on six of seven nights. The field model is a GPP model
+  and cash ownership drives nothing (the cash objective ignores it), so this is
+  a display problem until a separate cash model is wanted.
+- **GPP small slates are already about right; big slates are too flat.** The
+  NFL's fix (a cap that rises as games fall) is the wrong shape for hockey.
+- Per-contest best fits all want **PP1 0.6–0.8** (shipped 0.4); VALUE and
+  SALARY move around. Next: one pooled GPP fit across the seven nights with a
+  slate-size term, scored out of sample.
+- Ownership changes no lineup today: `own_weight` is 0 in the app and the CLI.
+
+**Buzz:** the earlier "no signal" runs used the wrong night's board too, so
+they are void as well. Re-run `scripts/buzz_fit_nhl.py` on the rebuilt nights.
+
+## 6c. Field-aware cash objective (the app's cash lineup since 2026-10-10)
+
+The floor lineup is still built and logged next to it (`mode=cash_floor` in
+`data/dfs_lineups_nhl_<date>.csv`) so the switch keeps being graded.
+
+The floor objective maximises a cash lineup's own 25th percentile and ignores
+the field -- the wrong question on a small slate, where 75-88% of a double-up
+rosters the same top player and the cash line is "how the chalk did".
+`edge/dfs_nhl_field.py` samples 300 field lineups from a CASH ownership model,
+takes the score the field needs to cash in each simulation (top 44%), and
+`dfs_opt_nhl.optimize(..., line=...)` maximises the (smoothed) chance of
+clearing it.
+
+Cash ownership, fitted on squared error over the eight graded double-ups:
+VALUE 1.0, SALARY 0.5, PP1 0.8, cap 90 (RMSE 7.23 vs 7.55 for the GPP model).
+
+`scripts/nhl_cash_field.py`, leave one night out, real DK points vs the real
+cash line:
+
+| | cashed | mean finish percentile | mean points |
+|---|---|---|---|
+| floor (shipped) | 3 / 8 | 51% | 105.5 |
+| field-aware | 5 / 8 | 63% | 118.3 |
+
+Field-aware finished higher on 7 of 8 nights (one-sided sign test p = 0.035).
+But the model's OWN estimate of the gain is small -- P(clear) +1 to +5 points
+per night -- so most of the realised +12 points is noise from two different
+lineups on eight nights; read it as "not worse, probably better", not as a
+measured 25-point cash-rate gain. The difference concentrates on small slates
+(on the 10-game 10/10 slate the two lineups shared 7 of 9 players, 75% vs 76%).
+
 ## 7. Nightly workflow
 
 ```bash
@@ -127,8 +212,11 @@ python3 scripts/dfs_lineups_nhl.py --list          # slates
 python3 scripts/dfs_lineups_nhl.py                 # main slate, cash + GPP (logs the build)
 python3 scripts/dfs_lineups_nhl.py --gpp 5         # five different GPP lineups
 # ~1-2h before puck drop, when goalies are confirmed: rebuild (late swap is allowed)
-# after the slate: drop exports into data/, then per contest:
+# after the slate: drop exports into data/. If the night was built only on the
+# phone, it is not in the log -- rebuild it from pinned pre-lock inputs first:
+python3 scripts/nhl_rebuild.py <gid>
 python3 scripts/nhl_calibration.py data/contest-standings-<id>.csv --fit-ownership
+# CHECK the "-> <date> draft group <gid>" line is the contest's own night.
 ```
 
 Timers (deploy/, systemd --user): `odds-collect-dfs-nhl` / `odds-publish-dfs-nhl`
