@@ -98,13 +98,16 @@ own OUT/IR status is honoured).
 Export `195958188`, graded against the build logged at 6:35 PM ET (after the
 skater-team fix below). `scripts/nhl_calibration.py --fit-ownership`:
 
-| | n | bias | MAE | rank corr | below floor (25) | above 95th (5) |
+| | n | bias | MAE | rank corr | below floor (25) | above 90th (10) |
 |---|---|---|---|---|---|---|
 | skaters | 113 | +0.47 | 5.14 | +0.23 | 26% | **11%** |
 | goalies | 8 | −0.34 | 7.18 | +0.26 | | |
 
 - The floor is calibrated; **the upper tail is too thin** — 11% of skaters
   beat their 95th percentile against 5% expected. One slate, so not tuned yet;
+  **Corrected 2026-10-17:** the logged ceiling is the 90th percentile (edge/nhl_sim.summarise,
+  since 9/28), so the target is 10%, not 5% -- the grader mislabelled it. On every live build
+  through 10/17, 9.1% of skaters (123/1,350) and 9.3% of goalies beat it: the tail is calibrated.
   the first suspects are the linemate-affinity prior and per-player goal
   variance. Watch it on the next exports.
 - Props-priced skaters ran +0.87 high, last-season estimates +0.11.
@@ -150,6 +153,9 @@ ownership is ~880% of a 900% roster.
   the simulator's main open problem and it matters most for GPP, which
   selects on the 95th. Suspects unchanged: linemate-affinity prior,
   per-player goal variance.
+  **Corrected 2026-10-17:** the logged ceiling is the 90th percentile (edge/nhl_sim.summarise,
+  since 9/28), so the target is 10%, not 5% -- the grader mislabelled it. On every live build
+  through 10/17, 9.1% of skaters (123/1,350) and 9.3% of goalies beat it: the tail is calibrated.
 
 **Ownership by slate size** (top owned / sum of top three, field vs model):
 
@@ -244,3 +250,38 @@ Cash field (13 double-ups, same method, squared error as in §6c): shipped
 NOT shipped: cash ownership drives the field-aware cash lineup, and the gain is
 small enough that it needs `scripts/nhl_cash_field.py` (8 nights hard-coded)
 extended to all 13 nights first.
+
+## 6e. Goalie points: what the market can and cannot predict (2026-10-17)
+
+Adam asked whether the paid-tool approaches (SaberSim's game simulation,
+FantasyLabs' Vegas/saves model, starter-news adjusters) would fix goalies. Our
+build already does the first two (edge/nhl_sim.py: Poisson goals from the
+moneyline + total, saves from simulated opponent shots rescaled to the DK saves
+prop) and the third (DailyFaceoff starters + edge-monitor goalie-change alerts).
+Tested on every graded goalie: 171 on 13 slates (9/29-10/17), box scores from
+the NHL API, pre-lock saves lines and no-vig moneylines from data/odds.db
+(165/171 had both). Leave one slate out:
+
+| predictor of DK points | held-out MAE | corr |
+|---|---|---|
+| a constant (mean) | 8.10 | -- |
+| our projection | 8.12 | +0.05 |
+| moneyline P(win) | 8.09 | -0.02 |
+| P(win) + saves line | 8.13 | -0.08 |
+
+The market predicts the PARTS -- P(win) vs wins +0.33 (Brier 0.227 vs 0.25),
+saves line vs saves +0.32 (ours +0.02) -- but they offset: a favourite faces
+fewer shots, an underdog more, and goals against (sd 5.9 of a 9.9-point total)
+is noise at this n. One extra save on the line is worth -0.14 points net. So
+no median model, ours or a rebuilt "Vegas" one, beats a constant yet; NOT
+shipped, no code changed.
+
+What is worth watching:
+- **Ceiling games skew to busy underdogs** (top 10%, >= 21.4 pts, ~17 games):
+  rate by saves-line tercile 5 / 13 / 14%, by P(win) tercile 16 / 11 / 5%.
+  Too few games to fit; recheck at ~30 slates. It matters for GPP only.
+- **The goalie tail is calibrated** (corrected the same day): 9% beat the logged
+  ceiling, which is the 90th percentile, target 10%. Floor 26% (target 25). No
+  simulator change.
+- **Wrong starters cost the most per case:** 4 of 171 (2%) projected starters
+  did not play (0 points); 7 more were pulled.
