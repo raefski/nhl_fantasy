@@ -242,6 +242,8 @@ out (fit on 11, score the 12th), on mean absolute error:
 | held-out fit | **2.86** | **4.76** | **+0.75** |
 
 Better on 11 of 12 slates; 11 of 12 folds chose 0.6 / 0.6 / 0.6, which shipped.
+**Forward check (2026-10-19):** on the 5 GPPs filed after the fit (10/17-10/18, fields
+19-891, 3 slates), new vs old weights: MAE 3.51 vs 3.87, better on 5/5, rank up on 4/5.
 GPP `own_weight` is still 0, so this changes the ownership and leverage shown,
 not the lineups built.
 
@@ -285,3 +287,118 @@ What is worth watching:
   simulator change.
 - **Wrong starters cost the most per case:** 4 of 171 (2%) projected starters
   did not play (0 points); 7 more were pulled.
+
+## 6f. Ownership refits re-checked with whole days held out (2026-10-19)
+
+Adam plays early, main and late slates; an early slate's games are also on that
+day's main slate, so folds now hold out a whole DAY, not a draft group.
+
+- **GPP** (17 contests, 13 days): prior 0.8/0.5/0.4 MAE 3.35 -> held-out refit
+  3.05, RMSE 5.60 -> 5.00, rank +0.67 -> +0.73, better on 16/17; 12/13 folds
+  picked 0.6/0.6/0.6 -- the 10/17 ship stands.
+- **Cash field** (15 nights; 154747 has no rebuildable draftables snapshot),
+  `scripts/nhl_cash_field.py --all --compare`, field-aware lineups on real
+  points: shipped CASH_WEIGHTS cashed 9/15 (mean pct 57%, 110.1 pts, own RMSE
+  8.06); day-held-out refit 10/15 (58%, 111.1, own RMSE 8.34). Ownership worse
+  held out, one extra cash on one night (10/6): NOT changed.
+
+## 6g. Field ownership as a projection signal: tested, not shipped (2026-10-19)
+
+GPP_META.md G found NHL skaters the crowd over-owned (vs. salary + our
+projection) beat projection by +0.45 pts per SD. Is it usable before lock?
+`scripts/nhl_ownership_signal.py`: 15 slates / 13 days / 2,714 skaters,
+leave one day out, MAE vs a recalibrated projection (M0 4.799):
+
+| added to the projection | held-out MAE change [95% CI] | days better |
+|---|---|---|
+| our predicted-ownership excess (pre-lock) | -0.009 [-0.033, +0.022] | 9/13 |
+| actual %Drafted excess (hindsight ceiling) | -0.012 [-0.034, +0.010] | 9/13 |
+| form + role (pre-lock) | -0.019 [-0.043, +0.005] | 8/13 |
+
+Even perfect knowledge of the field's ownership is worth 0.01 points of MAE:
+the crowd's information is real but small. Its surprises (actual minus our
+predicted ownership) track recent form (+0.18 rank corr, 15/15 slates) and
+top-six role (+0.20, 15/15). So the crowd is mostly reading recent form, and
+the form itself is the thing to test, not the ownership.
+
+Pre-lock biases worth a fix once more days land (per day, day bootstrap):
+- **Cold skaters are over-projected:** bottom form quintile (season-to-date DK
+  pts/game, shrunk to last season at k=5 games, minus tonight's projection)
+  scored -0.83 [-1.55, -0.15] vs projection (4/13 days). Hot minus cold
+  +1.15 [+0.26, +2.24] (11/13). Our prop-based means don't fully price form.
+- **Depth skaters (not F1/F2/D1, not PP1) are over-projected** -0.51 [-0.82,
+  -0.11], 1/13 days above. They average 1.4% owned, so GPP lineups barely touch
+  them, but they are cash value plays.
+
+Not shipped: 13 days and several cuts looked at. Recheck both at ~25 days.
+If they hold, the fix belongs in edge/nhl_sim.py's means (form blend, depth
+shrink), not in ownership.
+
+## 6h. Context features (not box-score stats, not book prices): what moves a skater's night (2026-10-19)
+
+Adam asked what makes the best skaters other than stats and books.
+`scripts/nhl_context_features.py` (`--fetch` caches NHL API referees, coaches,
+start times and venues beside the box scores). Target: DK points minus the
+player's own leave-one-out mean (shrunk to last season, k=10) minus the
+opponent's allowed, so identity carries skill and only context is left. Fit on
+2025-26 (1,312 games), checked on 2026-27 (139 games), intervals resample
+games. About 30 features were tried, so expect one or two false positives at 5%.
+
+**Ship candidate: 11 F / 7 D lineups, unpriced and visible before lock.**
+DailyFaceoff lists the 7th defenceman as group `d4` (COL, DET, LAK, TBL had one
+on 10/19). `LINE_GROUPS` in edge/nhl.py has no `d4`, so the board drops him and
+projects the other six at full minutes. In 7-D games (111 team-games 2025-26),
+every pair loses 1.5-1.9 min, 0.6-0.7 DK pts and 0.14-0.29 blocks. The top
+three forwards gain about 1 min (+0.40 pts, +0.14 shots). On our own logged
+2026-27 nights the six projected D fell **-0.88 [-1.55, -0.25] pts short of
+our projection** (151 skater-games, 10 days), the size the 2025-26 fit predicts
+(-0.73).
+
+**Built 2026-10-20** (edge/nhl.py reads `d4`; `edge/dfs_run_nhl.seven_d_teams` flags
+a team from a d4 row or exactly 11 listed forwards; each of its D gets
+`SEVEN_D_SCALE`: blocks x0.855, shots x0.933, goals x0.92, assists x0.97; the
+app names the teams). Forwards are left alone: they gain ~1 min, but DK points
+x1.017 [0.99, 1.06]. The pre-lock signal at lock time: 16 of 19 flagged teams
+dressed 7 D; it caught 16 of 25.
+
+Before/after (`scripts/nhl_seven_d_compare.py --placebo 2`): 11 logged slates with a
+7-D team at lock, each rebuilt from pinned inputs with and without the scale:
+
+| | D-games | MAE | bias | nights better |
+|---|---|---|---|---|
+| old board | 110 | 4.135 | +0.98 | |
+| 7-D scale | 110 | **3.975** | **+0.35** | 9/10 |
+
+Lineups: any nudge to a few D reshuffles 3-4 of 9 slots (hill-climb path
+dependence), so the lineup grade is noise at this n. The 15 changed lineups with
+an export scored -13.7 real pts vs the old (sd 24, 4 better / 11 worse). The
+placebo (same scale on random teams that did NOT dress 7 D, 29 changed
+lineups) scored -8.8 (sd 25, 11/18). The difference, -4.9 +/- ~8, is
+indistinguishable. The old lineups happened to hit on these nights. The
+decision rests on the projection, which is better held out.
+
+**Real in 2025-26 but probably already in the books' prices (they move team
+totals, props and the starter):** back-to-back -0.27 [-0.49, -0.06] (shots);
+a back-to-back after last night's OT/SO -0.55 [-0.92, -0.16]; home +0.23
+[+0.07, +0.39]; opponent starts its backup +0.24 [+0.07, +0.40] (goals).
+Against our projection on 18 logged days these are inside the noise.
+
+**Candidates without enough forward data yet:**
+- first game back after missing 3+ team games: -0.50 [-0.79, -0.21] (shots
+  and blocks; DailyFaceoff shows returns);
+- a top-2-minutes teammate forward out: the other forwards +0.36 [+0.11, +0.68],
+  with extra shots (usage vacuum);
+- **rink scorer effect on blocks**: visitors' recorded blocks run 0.81x (CHI)
+  to 1.19x (COL); split-half corr +0.63, 2025-26 to 2026-27 +0.34. As a blocks
+  adjustment (deflate last season by his rinks, inflate by tonight's) it moves
+  a D about +/-0.27 pts per game including the 3+ block bonus. Forward
+  blocks MSE -0.003 [-0.009, +0.002] (4,482 skater-games), not yet
+  significant. Blocks have no market, so this is the one rink channel books
+  can't price. Recheck at ~400 2026-27 games. Shots by rink 0.84 (CAR) to 1.14
+  (TOR), split-half +0.70, but shots have props.
+
+**Nothing there:** referee crews (crew PP rate predicts PP chances +0.10 in
+2025-26, -0.00 in 2026-27: no persistence), travel distance, time-zone shifts,
+body clock, matinees, altitude, NBA-shared ice, division games, a new coach,
+a new team, facing a former team. Published work agrees on contract years
+(IZA 2024: no average effect).
