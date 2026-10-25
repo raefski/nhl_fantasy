@@ -514,6 +514,35 @@ Not shipped: **7-D blocks factor** (0.855 -> 0.95, the TRAIN argmin): TRAIN RMSE
 0.0002; TEST worse per night at lock (+0.047 [−0.018, +0.141], 3/8). The critic's
 gap came mostly from TEST nights; recheck at ~30 nights.
 
-Still open: the assist draw delivers about 4.5% fewer assists than ASSISTS_PER_GOAL
-for every skater (a twice-clashing second assist is dropped); fixing it would add
-~0.06 pts per skater to a model that already over-projects by +0.17.
+**Fixed the same day (at Adam's request): the dropped second assist.** simulate()
+redrew a second assister once on a clash with the first and dropped the assist on a
+second clash, so teams ran below the fitted 1.689 assists per goal (1.666 on the
+12-game 10/20 slate, stars the most short at 0.975 of target). The second assister is
+now drawn from the other teammates, and the solve uses P(j second | i) = q_ij Σ_{k≠j}
+q_ik / (1 − q_ik). Now: 1.692 per goal, every salary tier within 0.5% of target. Lab,
+4 seeds, test: RMSE 5.929 -> 5.928 (lock), 5.945 -> 5.943 (early); MAE 4.449 -> 4.453;
+rank flat; bias +0.18 -> +0.20 (projections +0.023 per skater). A correctness fix,
+neutral on held-out error. It leaves the general over-projection a little more exposed.
+
+## 6m. Critique cycle 3: the test nights are the limit (2026-10-22)
+
+Nothing shipped (NHL_CRITIQUE_LOG.md cycle 3). Skater error is now at the simulator's
+own spread (test MSE 35.2 vs simulated variance 38.3), the books' shots / points lines
+are calibrated, and no player or team miss persists from train to test except blocks.
+The best mean change found (this season's blocks + rink scorer) was better on TRAIN and
+worse on pooled TEST; 8,000 sims instead of 2,000 was mixed held out and doubles build
+time. Rule from here: mean changes to unpriced components get validated on 2025-26 box
+scores first (harness to build), since 8 test nights cannot certify gains under ~0.02
+RMSE. Candidate next focus: the simulated spread (3-8% wider than realised errors),
+which sets the cash floor and GPP ceiling.
+
+## 6n. This season's production in the unpriced means (2026-10-22, critique cycle 4)
+
+New harness `scripts/nhl_season_lab.py`: the 2025-26 season (47,231 skater-games, 167
+dates) replayed through `skater_means` (the board's recipe, now one function) and the
+simulator, on the no-prop path; H1 to 12/31 fits, H2 checks. Shipped: every mean last
+season sets is blended with this season's per-game production (`blend_season`, K points
+30 / shots 7 / blocks 20; `nhl.skater_season_to_date`, two stats-API requests a build).
+Season lab H2: RMSE 6.262 -> 6.119, bias +0.30 -> +0.15, rank +0.393 -> +0.423 (78/86
+dates better). 2026-27 test: not worse (lock RMSE 5.928 -> 5.926, early 5.943 -> 5.939);
+the gain grows as games accumulate. Details: NHL_CRITIQUE_LOG.md cycle 4.
