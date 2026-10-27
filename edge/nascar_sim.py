@@ -64,8 +64,10 @@ import numpy as np
 # Fitted constants. scripts/nascar_fit.py, NASCAR Cup 2022-2026,
 # 6,088 scored driver-races with leak-free prior-12-race form.
 # ---------------------------------------------------------------------------
-#: E[finish] = c + b_start*start + b_form*form_finish + b_led*form_led
+#: E[finish] = c + b_start*start + b_run*ew12 + b_type*ewtt + b_led*form_led
 #:                + b_dnf*form_dnf,  with `resid_sd` the unexplained spread.
+#: (Before cycle 1 the form term was form_finish; the history below is that
+#: model's and its reasoning still holds.)
 #:
 #: THE R-SQUARED COLUMN IS THE POINT. Starting position correlates 0.458 with
 #: finish at a short track and 0.076 at a superspeedway; the regressions land
@@ -94,12 +96,45 @@ import numpy as np
 #:
 #: The other three rows are stable. Refitting them without 2026 moves `start`
 #: by 0.009 at most (short 0.295 vs 0.290) and R^2 by 0.01.
+#:
+#: CYCLE 1 (2026-10-25, NASCAR_CRITIQUE_LOG.md): form_finish is replaced by
+#: two RUNNING-POSITION terms (running_form above): ew12, recency-weighted
+#: average running position over all earlier races, and ewtt, the same at
+#: this track type only. Held out (fit 2022-24, test 2025-26, 66 races):
+#: finish MAE 8.30 -> 8.18, mean race Spearman 0.394 -> 0.427, every track
+#: type better; a 2022-23 -> 2024 check agrees (8.33 -> 8.26). The
+#: superspeedway row stays REDUCED for the reason above: its full fit put
+#: form_led at +22.0, and dropping led/dnf there costs 0.02 MAE on the 2024
+#: check (9.63 vs 9.65) -- noise, not signal.
+#:
+#: CYCLE 2 (2026-10-25): the latent is fitted on drivers STILL RUNNING at
+#: the end, and resid_sd is k x that fit's residual spread (k: cycle 3 below). simulate()
+#: sends its own DNFs to the back; a latent fitted on every finish already
+#: carried the wrecks, so each was counted twice and the simulated mean
+#: finishes bunched toward mid-pack (slope of actual on simulated mean 1.34
+#: at intermediates). k = 0.7 chosen on the inner 2022-23 -> 2024 split
+#: (MAE 8.15 / 8.10 / 8.09 / 8.09 / 8.11 for k 1 / .8 / .7 / .6 / .5). Held
+#: out 2025-26: finish MAE 8.18 -> 7.96, Spearman 0.424 -> 0.429, every
+#: track type better; actual DK points inside a driver's simulated 10-90%
+#: band 83.7% -> 79.6% (target 80), simulated DK sd 25.2 vs real 26.2 (4%
+#: narrow, inside the 10% bar). The R2 column is the running-only fit's.
+#:
+#: CYCLE 3 (2026-10-25): k is 0.85, not 0.7. 0.7 was chosen by MAE, the
+#: median's loss; lineups sum MEANS and read floors/ceilings off the spread,
+#: and at 0.7 top-10 starters projected ~1.5 places too good (held out).
+#: Re-chosen on the inner split by the DK 10-90% band hitting 80% (78.4 /
+#: 80.3 / 81.7% at k 0.7 / 0.85 / 1.0). Held out 2025-26: RMSE 9.84 -> 9.80,
+#: bias starts 1-10 -1.49 -> -0.87, starts 26+ +0.82 -> +0.28, band 81.5%;
+#: MAE 7.96 -> 8.00 (the price of the mean over the median).
+#:
+#: Fitted by `python3 scripts/nascar_lab.py fit`, Cup 2022-2026, non-DNF
+#: driver-races with prior form, 2-season form history (as live).
 FINISH_MODEL = {
-    #                const   start   formFin  formLed  formDNF  resid_sd   R2
-    "superspeedway": (13.18, 0.006, 0.335, 0.0, 0.0, 11.08, 0.027),
-    "intermediate": (5.68, 0.214, 0.533, -8.08, -5.70, 9.64, 0.181),
-    "short": (2.98, 0.290, 0.641, -16.16, -10.62, 8.88, 0.287),
-    "road": (6.93, 0.335, 0.346, -4.60, -5.09, 9.87, 0.182),
+    #                const    start   ew12    ewtt   formLed  formDNF  resid_sd  R2
+    "superspeedway": (6.590, 0.010, 0.471, -0.019, 0.0, 0.0, 7.46, 0.086),
+    "intermediate": (-0.495, 0.167, 0.423, 0.320, 3.18, -1.15, 6.68, 0.320),
+    "short": (1.052, 0.218, 0.272, 0.411, -8.88, -1.75, 6.60, 0.368),
+    "road": (3.165, 0.269, 0.183, 0.312, -0.07, -1.08, 7.45, 0.240),
 }
 
 #: P(DNF) by track type and starting bucket.
@@ -143,6 +178,35 @@ LAP_MODEL = {
 
 DEFAULT_TRACK = "intermediate"
 
+#: Front-of-grid lead boost (critique cycle 4, DK-points target, 2026-10-26).
+#: The lap-led weight used to depend only on the simulated finish and the
+#: driver's lead form, so the pole sitter -- who leads the opening run and
+#: banks laps-led and fastest-lap points wherever he finishes -- got nothing
+#: for starting there. Held out (fit 2022-24, test 2025-26, 66 races) the
+#: pole was projected 32.2 DK points against 55.8 actual (laps-led pts 4.6 vs
+#: 16.2), front row 30.9 vs 37.8; in train too (pole -8.5, P2 -7.3). The lead
+#: weight is multiplied by 1 + FRONT_A * exp(-(start-1) / FRONT_S); grid FA
+#: {0,2,4,8,16} x FS {0.7,1.5} chosen on the inner 2022-23 -> 2024 split
+#: (2024 RMSE 23.73 -> 23.63, front-row bias -6.5 -> +1.6). The boost feeds
+#: fastest laps through the same weight. NASCAR_CRITIQUE_LOG.md cycle 4.
+FRONT_A = 2.0
+FRONT_S = 1.5
+
+#: Fastest-lap pool as a share of race distance, per track type: mean over
+#: races of sum(fast_laps) / actual_laps, 2022-24 Cup loop data (cycle 4).
+#: Only green-flag laps award a fastest lap, and the live build has no caution
+#: count before the race, so nascar.green_laps() returned the full scheduled
+#: distance -- a pool ~25% too big and +0.9 DK points/driver of bias (held out
+#: +0.90 -> +0.23). simulate() uses this whenever the caller gives no
+#: green_laps.
+FAST_FRAC = {"superspeedway": 0.748, "intermediate": 0.782, "short": 0.832,
+             "road": 0.753}
+
+#: Half-lives, in races, of the running-position form (cycle 1, chosen on
+#: 2022-24: NASCAR_CRITIQUE_LOG.md).
+RUN_HL_ALL = 12.0
+RUN_HL_TYPE = 6.0
+
 #: League-average form, for a driver with no history -- a rookie, or the first
 #: race of a season. Deliberately mediocre rather than optimistic: an unknown
 #: car is far more likely to be a backmarker than a contender, and a model that
@@ -172,13 +236,48 @@ def dnf_probability(start: int, track: str, form_dnf: float | None = None) -> fl
     return float(min(0.60, max(0.02, 0.75 * base + 0.25 * float(form_dnf))))
 
 
+def running_form(history: list[tuple[float, str]]) -> dict:
+    """Recency-weighted AVERAGE RUNNING POSITION from a driver's earlier races.
+
+    `history` is [(avg_pos, track_type), ...] oldest first, races with loop
+    data only. Returns {"ew12": all races, half-life RUN_HL_ALL races;
+    "ewtt_by_type": {track_type: same, that type only, half-life RUN_HL_TYPE}}
+    -- empty when there is no history.
+
+    WHY (NASCAR_CRITIQUE_LOG.md cycle 1): a finishing position is a running
+    position scrambled by wrecks, late cautions and pit cycles. Kyle Larson's
+    12-race finish average read 17.4 at Kansas because two wrecks sat in the
+    window; where he RAN is the cleaner speed signal. And a short-track car is
+    not a superspeedway car, so the same-type history gets its own term.
+    """
+    if not history:
+        return {}
+
+    def ew(xs, hl):
+        w = 0.5 ** (np.arange(len(xs))[::-1] / hl)
+        return float(np.dot(w, xs) / w.sum())
+    out = {"ew12": ew([x for x, _ in history], RUN_HL_ALL), "ewtt_by_type": {}}
+    for t in {t for _, t in history}:
+        out["ewtt_by_type"][t] = ew([x for x, tt in history if tt == t], RUN_HL_TYPE)
+    return out
+
+
 def expected_finish(driver: dict, track: str) -> float:
-    """The fitted E[finish] for one driver, before race-day noise."""
-    c, b_s, b_f, b_l, b_d, _sd, _r2 = FINISH_MODEL.get(
+    """The fitted E[finish] for one driver, before race-day noise.
+
+    A driver with no loop-data history falls back to his finish form for both
+    running terms (and that to DEFAULT_FORM) -- the same fallback the fit used.
+    """
+    c, b_s, b_r, b_t, b_l, b_d, _sd, _r2 = FINISH_MODEL.get(
         track, FINISH_MODEL[DEFAULT_TRACK])
+    fin = float(driver.get("form_finish") or DEFAULT_FORM["form_finish"])
+    ew12 = driver.get("ew12")
+    ew12 = fin if ew12 is None else float(ew12)
+    ewtt = (driver.get("ewtt_by_type") or {}).get(track, driver.get("ewtt"))
+    ewtt = ew12 if ewtt is None else float(ewtt)
     return (c
             + b_s * float(driver.get("start") or 20)
-            + b_f * float(driver.get("form_finish") or DEFAULT_FORM["form_finish"])
+            + b_r * ew12 + b_t * ewtt
             + b_l * float(driver.get("form_led") or DEFAULT_FORM["form_led"])
             + b_d * float(driver.get("form_dnf") or DEFAULT_FORM["form_dnf"]))
 
@@ -203,9 +302,10 @@ def simulate(drivers: list[dict], race: dict, n_sims: int = 2000,
 
     track = race.get("track_type") or DEFAULT_TRACK
     laps = float(race.get("actual_laps") or 300)
-    green = float(race.get("green_laps") or max(1.0, laps * 0.88))
+    green = float(race.get("green_laps")
+                  or max(1.0, laps * FAST_FRAC.get(track, FAST_FRAC[DEFAULT_TRACK])))
     lap_cfg = LAP_MODEL.get(track, LAP_MODEL[DEFAULT_TRACK])
-    resid_sd = FINISH_MODEL.get(track, FINISH_MODEL[DEFAULT_TRACK])[5]
+    resid_sd = FINISH_MODEL.get(track, FINISH_MODEL[DEFAULT_TRACK])[6]
 
     starts = np.array([float(d.get("start") or 20) for d in drivers])
     mu = np.array([expected_finish(d, track) for d in drivers])
@@ -237,7 +337,8 @@ def simulate(drivers: list[dict], race: dict, n_sims: int = 2000,
     #    that dominated and then blew up. That is a real and known bias, and it
     #    is small: most DNFs are not leaders.
     decay, conc = lap_cfg["decay"], lap_cfg["conc"]
-    weight = np.exp(-decay * (finish - 1)) * (1.0 + 8.0 * lead_form)
+    weight = (np.exp(-decay * (finish - 1)) * (1.0 + 8.0 * lead_form)
+              * (1.0 + FRONT_A * np.exp(-(starts[None, :] - 1.0) / FRONT_S)))
     weight = np.where(dnf, weight * 0.15, weight)
     laps_led = _dirichlet_alloc(rng, weight, conc, laps)
 
