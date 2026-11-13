@@ -436,3 +436,133 @@ def test_lab_shots_power_moves_only_imputed_shots():
     before = np.mean([p["means"]["shots"] for p in out[:2]])
     lab.shrink_imputed_shots(s, 0.5)
     assert np.mean([p["means"]["shots"] for p in s["pool"][:2]]) == pytest.approx(before, abs=0.05)
+
+
+def test_lineup_lab_replays_a_cached_board_and_scores_it_against_the_field(monkeypatch):
+    """Cycle 13 (lineup harness, scripts/nhl_lineup_lab.py): a cached pre-sim board is
+    simulated and run through production's three optimizers (legal 9s); each lineup is
+    scored in its own contest type only (cash and cash_floor vs cash, gpp vs GPPs), by field
+    percentile, cash line and the payout table, on DK points with a box-score fallback."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "nhl_lineup_lab_t", Path(__file__).resolve().parents[1] / "scripts" / "nhl_lineup_lab.py")
+    L = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(L)
+    pool, _ = _slate()
+    for p in pool:
+        for k in ("proj", "sd", "floor", "ceil", "p99", "own", "leverage"):
+            p.pop(k, None)
+    games = {g: {"home": h, "away": a, "lam_home": 3.1, "lam_away": 3.0}
+             for g, (h, a) in {"g1": ("AAA", "BBB"), "g2": ("CCC", "DDD"),
+                               "g3": ("EEE", "FFF")}.items()}
+    board = {"gid": 1, "date": "2026-10-20", "games": games, "pool": pool}
+    monkeypatch.setattr(L, "N_SIMS", 400)
+    monkeypatch.setattr(L, "ITERS", 10)
+    monkeypatch.setattr(L, "_BOARDS", {1: board})
+    _, _, _, lus = L._job(("shipped", 1, 0))
+    for mode in L.MODES:
+        lu = lus[mode]
+        assert len(lu) == 9 and sum(p["salary"] for p in lu) <= nhl.SALARY_CAP
+        assert Counter(p["pos"] for p in lu)["G"] == 1
+
+    field = np.array([300.0, 250.0, 200.0, 150.0, 100.0])
+    monkeypatch.setattr(L, "fields", lambda: {1: [(11, "cash", field, 200.0), (12, "gpp", field, 300.0)]})
+    gpp = lus["gpp"]
+    monkeypatch.setattr(L, "_DK", {1: {L.norm(p["name"]): 30.0 for p in gpp[1:]}})
+    goalie_in_box = gpp[0]
+    from scripts.nhl_ownership_signal import box_key
+    bk = box_key(goalie_in_box["team"], goalie_in_box["name"])
+    if goalie_in_box["pos"] == "G":
+        bk = ("G",) + bk
+    monkeypatch.setattr(L, "_BOX", [{"2026-10-20": {bk: 10.0}}, box_key])
+    monkeypatch.setattr(L, "_PAY", {12: {"fee": 1.0, "tiers": [(1, 3, 2.0)]}})
+    out = L.contest_rows(1, "gpp", [gpp], "t")
+    assert len(out) == 1 and out[0]["contest"] == 12                      # never the cash contest
+    r = out[0]
+    assert r["points"] == 250.0 and r["cashed"] == 0.0 and r["ret"] == 2.0   # rank 2 (tie not split)
+    assert r["pctile"] == pytest.approx(3 / 5) and r["split"] == "test"
+    assert [x["contest"] for x in L.contest_rows(1, "cash_floor", [lus["cash_floor"]], "t")] == [11]
+
+
+# ---------------------------------------------------------------------------
+# starting goalies: P(start) (NHL critique cycle 14, 2026-11-12)
+# ---------------------------------------------------------------------------
+def test_goalie_start_prob_cells():
+    from edge import dfs_run_nhl as R
+    assert R.goalie_start_prob("Confirmed", True, False) == 1.0
+    assert R.goalie_start_prob("Likely", False, True) == 1.0
+    # DFO's no-news default on rest = the goalie who started last game: the warmup switch risk
+    assert R.goalie_cell(None, True, False) == "Projected/started_last"
+    assert R.goalie_cell("Projected", True, True) == "Projected/started_last"
+    # its rotation pick for the second night of a back-to-back
+    assert R.goalie_cell(None, False, True) == "Projected/b2b_backup"
+    assert R.goalie_cell(None, False, False) == "Projected/other"
+    # no box scores reachable -> the status rate; an unknown DFO label is no news
+    assert R.goalie_cell(None, None, None) == "Projected"
+    assert R.goalie_cell("Unconfirmed", None, None) == "Projected"
+    p = R.GOALIE_START_P
+    assert p["Projected/started_last"] < p["Projected/other"] < p["Projected/b2b_backup"] < 1.0
+    assert all(0.0 < v <= 1.0 for v in p.values())
+
+
+def test_unsure_goalie_zeroes_only_his_own_draws():
+    games = {"g": {"home": "AAA", "away": "BBB", "lam_home": 3.2, "lam_away": 3.0}}
+    base = _team("AAA", "BBB") + _team("BBB", "AAA")
+    sure = nhl_sim.simulate([dict(p) for p in base], games, n_sims=4000, seed=5)
+    pool = [dict(p) for p in base]
+    gi = next(i for i, p in enumerate(pool) if p["name"] == "AAAG")
+    pool[gi]["p_start"] = 0.6
+    unsure = nhl_sim.simulate(pool, games, n_sims=4000, seed=5)
+    others = [i for i in range(len(pool)) if i != gi]
+    assert np.array_equal(sure[:, others], unsure[:, others])      # skaters + the other goalie
+    sat = unsure[:, gi] != sure[:, gi]
+    assert np.all(unsure[sat, gi] == 0.0)
+    assert 0.35 < sat.mean() < 0.45
+    assert unsure[:, gi].mean() < 0.7 * sure[:, gi].mean()
+    pool[gi]["p_start"] = 1.0                                      # a certain starter: untouched
+    assert np.array_equal(nhl_sim.simulate(pool, games, n_sims=4000, seed=5), sure)
+
+
+def test_last_starts_takes_each_teams_latest_regular_season_starter(monkeypatch):
+    week = {"gameWeek": [
+        {"date": "2026-11-03", "games": [{"id": 1, "gameType": 2, "awayTeam": {"abbrev": "NSH"},
+                                          "homeTeam": {"abbrev": "BOS"}}]},
+        {"date": "2026-11-04", "games": [{"id": 2, "gameType": 2, "awayTeam": {"abbrev": "LAK"},
+                                          "homeTeam": {"abbrev": "NSH"}}]},
+        {"date": "2026-11-05", "games": [{"id": 3, "gameType": 2, "awayTeam": {"abbrev": "LAK"},
+                                          "homeTeam": {"abbrev": "BOS"}}]}]}
+    boxes = {1: [("NSH", "J. Saros", True), ("BOS", "J. Swayman", True)],
+             2: [("LAK", "D. Kuemper", True), ("NSH", "J. Annunen", True), ("NSH", "J. Saros", False)],
+             3: [("LAK", "A. Forsberg", True), ("BOS", "J. Korpisalo", True)]}
+    monkeypatch.setattr(nhl, "_cached_json", lambda url, path, refresh=False: week)
+    monkeypatch.setattr(nhl, "boxscore", lambda gid, refresh=False: {"goalies": [
+        {"team": t, "name": n, "starter": s} for t, n, s in boxes[gid]]})
+    got = nhl.last_starts("2026-11-05", {"NSH", "LAK", "BOS"})
+    assert got["NSH"] == {"date": "2026-11-04", "goalie": "J. Annunen"}     # tonight's games excluded
+    assert got["LAK"] == {"date": "2026-11-04", "goalie": "D. Kuemper"}
+    assert got["BOS"] == {"date": "2026-11-03", "goalie": "J. Swayman"}
+
+
+def test_goalie_lab_cells_mirror_production():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import nhl_goalie_lab as G
+    from edge import dfs_run_nhl as R
+    last = ("2026-11-04", G.sig("D. Kuemper"))
+    for status in ("Confirmed", "Likely", "Projected"):
+        for goalie, date in (("Darcy Kuemper", "2026-11-05"), ("Anton Forsberg", "2026-11-05"),
+                             ("Darcy Kuemper", "2026-11-07"), ("Anton Forsberg", "2026-11-07")):
+            sl = G.sig(goalie) == last[1]
+            b2b = date == "2026-11-05"
+            assert G.cell_of(status, goalie, last, date) == R.goalie_cell(status, sl, b2b)
+    assert G.cell_of("Projected", "Anton Forsberg", None, "2026-11-05") == "Projected/other"
+    # fit: n counts team-games (leads pooled), shrunk toward the status rate
+    rows = [{"date": "2026-10-01", "team": "T", "lead": ld, "status": "Projected",
+             "cell": "Projected/started_last", "y": k < 6, "pts": 0.0}
+            for k in range(10) for ld in G.LEADS]
+    fit = G.fit_cells(rows)
+    assert fit["_n"]["Projected/started_last"] == 10.0
+    assert 0.6 < fit["Projected/started_last"] < 0.67
+    assert fit["Confirmed"] == 1.0
